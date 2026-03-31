@@ -22,7 +22,7 @@ class BPETokenizer:
         # initialise vocabulary
         self.vocab: dict[int, bytes] = {}
         for i in range(self.special_tokens_count):
-            self.vocab[i] = special_tokens[i]
+            self.vocab[i] = special_tokens[i].encode
         for i in range(256):
             self.vocab[i + self.special_tokens_count] = chr(i)
 
@@ -30,7 +30,72 @@ class BPETokenizer:
         self.words_counter: dict[str, int] = Counter()
         self.word_to_tokens: dict[str, list[int]] = {}
     
+    def train(self,
+        input_path: str | os.PathLike,
+        vocab_size: int,
+        **kwargs,
+        ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+        """
+        Train the BPE tokenizer.
+        """
+        # tokenise with the initial vocab to get words_counter and word_to_tokens
+        self.init_tokenization(input_path)
 
+        # count all the token pairs
+        token_pairs_counts = defaultdict(int)
+        for word, word_count in self.words_counter.items():
+            word_tokens = self.word_to_tokens[word]
+            word_token_pairs = zip(word_tokens[:-1], word_tokens[1:])
+            word_token_pairs_counts = Counter(word_token_pairs)
+            for pair, pair_count in word_token_pairs_counts.items():
+                token_pairs_counts[pair] += word_count * pair_count
+        
+        # find the pair with max count and max alphanumerical order
+        merge_pair = max(
+            token_pairs_counts,
+            key=lambda key: (token_pairs_counts.get(key), key)
+            )
+        
+        while self.curr_vocab_size < vocab_size: # perform merge actions.
+            # update vocab, vocab size, merges, token pair counts
+            self.vocab[self.curr_vocab_size] = self.vocab[merge_pair[0]] + self.vocab[merge_pair[1]]
+            new_token_id = self.curr_vocab_size
+            self.curr_vocab_size += 1
+            self.merges.append((self.vocab[merge_pair[0]], self.vocab[merge_pair[1]]))
+            token_pairs_counts.pop(merge_pair)
+            
+            # merge: for each word:
+            # - change word tokens
+            # - for each newly formed pairs, add to new pair, subtract from old pair
+            for word, word_count in self.words_counter.items():
+                word_tokens = self.word_to_tokens[word]
+                new_word_tokens = word_tokens.copy()
+                word_merges = 0
+                for i in range(len(word_tokens) - 1):
+                    if tuple(word_tokens[i:i+2]) == merge_pair:
+                        # edit new word tokens
+                        new_word_tokens = new_word_tokens[:i-word_merges] \
+                            + [new_token_id] \
+                            + new_word_tokens[i-word_merges+2:]
+                        # edit token pair counts
+                        if i < len(word_tokens) - 2:
+                            token_pairs_counts[tuple(word_tokens[i+1:i+3])] -= word_count
+                            token_pairs_counts[(new_token_id, word_tokens[i+2])] += word_count
+                        if i > 0:
+                            token_pairs_counts[tuple(word_tokens[i-1:i+1])] -= word_count
+                            token_pairs_counts[(word_tokens[i-1], new_token_id)] += word_count
+                        # edit word merges count
+                        word_merges += 1
+                self.word_to_tokens[word] = new_word_tokens
+
+            # find the next pair with max count and max alphanumerical order
+            # TODO: use caching to avoid iterating over all byte pairs
+            merge_pair = max(
+                token_pairs_counts,
+                key=lambda key: (token_pairs_counts.get(key), key)
+                )
+        
+        return self.vocab, self.merges
 
     def init_tokenization(self,
             input_path: str | os.PathLike,
@@ -281,17 +346,28 @@ class BPETokenizer:
     #     for i, token in enumerate(special_tokens):
     #         self.vocab[256+i] = token
     #         self.curr_vocab_size += 1
-        
-tokenizer = BPETokenizer(special_tokens=["<|endoftext|>"])
-merge_count = 1000
 
-file_path = "../tests/fixtures/tinystories_sample.txt"
-with open(file_path, "rb") as f:
-    sample = f.read()
-    tokenizer.init_tokenization(file_path)
-    print(tokenizer.words_counter)
-    for tok in tokenizer.word_to_tokens[' unexpected']:
-        print(tokenizer.vocab[tok])
+# tokenizer = BPETokenizer(special_tokens=["<|endoftext|>"])
+# vocab_size = 300
+
+# file_path = "../tests/fixtures/tinystories_sample.txt"
+# with open(file_path, "rb") as f:
+#     sample = f.read()
+#     vocab, merges = tokenizer.train(input_path=file_path, vocab_size=vocab_size)
+#     print(tokenizer.words_counter)
+#     for tok in tokenizer.word_to_tokens[' unexpected']:
+#         print(tokenizer.vocab[tok])
+        
+# tokenizer = BPETokenizer(special_tokens=["<|endoftext|>"])
+# merge_count = 1000
+
+# file_path = "../tests/fixtures/tinystories_sample.txt"
+# with open(file_path, "rb") as f:
+#     sample = f.read()
+#     tokenizer.init_tokenization(file_path)
+#     print(tokenizer.words_counter)
+#     for tok in tokenizer.word_to_tokens[' unexpected']:
+#         print(tokenizer.vocab[tok])
 
 # tokenizer = BPETokenizer(special_tokens=[])
 # merge_count = 10
