@@ -26,6 +26,7 @@ def find_chunk_boundaries(
     chunk_boundaries[-1] = file_size
 
     mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+    assert mini_chunk_size > len(split_special_token), "Mini chunk size must be larger than the special token"
 
     for bi in range(1, len(chunk_boundaries) - 1):
         initial_position = chunk_boundaries[bi]
@@ -43,14 +44,14 @@ def find_chunk_boundaries(
             if found_at != -1:
                 chunk_boundaries[bi] = initial_position + found_at
                 break
-            initial_position += mini_chunk_size
+            initial_position += mini_chunk_size - len(split_special_token) + 1
 
     # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
     return sorted(set(chunk_boundaries))
 
 
 ## Usage
-with open(..., "rb") as f:
+with open("../tests/fixtures/tinystories_sample.txt", "rb") as f:
     num_processes = 4
     boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
 
