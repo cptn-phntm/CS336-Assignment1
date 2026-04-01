@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-import resource
 import sys
+import pytest
+
+resource = pytest.importorskip("resource")
 
 import psutil
 import pytest

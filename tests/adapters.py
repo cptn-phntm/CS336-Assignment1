@@ -10,13 +10,14 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from cs336_basics.BPETokenizer import BPETokenizer
+from cs336_basics.TransformerArchitecture import *
 
 def run_linear(
     d_in: int,
     d_out: int,
-    weights: Float[Tensor, " d_out d_in"],
-    in_features: Float[Tensor, " ... d_in"],
-) -> Float[Tensor, " ... d_out"]:
+    weights: Float[Tensor, "d_out d_in"],
+    in_features: Float[Tensor, "... d_in"],
+) -> Float[Tensor, "... d_out"]:
     """
     Given the weights of a Linear layer, compute the transformation of a batched input.
 
@@ -29,8 +30,11 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-
-    raise NotImplementedError
+    layer = Linear(d_in, d_out)
+    layer.load_state_dict(
+        {"weights": weights}
+    )
+    return layer.forward(in_features)
 
 
 def run_embedding(
@@ -51,18 +55,20 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-
-    raise NotImplementedError
-
+    emb = Embedding(vocab_size, d_model)
+    emb.load_state_dict(
+        {"embeddings": weights}
+    )
+    return emb.forward(token_ids)
 
 def run_swiglu(
     d_model: int,
     d_ff: int,
-    w1_weight: Float[Tensor, " d_ff d_model"],
-    w2_weight: Float[Tensor, " d_model d_ff"],
-    w3_weight: Float[Tensor, " d_ff d_model"],
-    in_features: Float[Tensor, " ... d_model"],
-) -> Float[Tensor, " ... d_model"]:
+    w1_weight: Float[Tensor, "d_ff d_model"],
+    w2_weight: Float[Tensor, "d_model d_ff"],
+    w3_weight: Float[Tensor, "d_ff d_model"],
+    in_features: Float[Tensor, "... d_model"],
+) -> Float[Tensor, ".. d_model"]:
     """Given the weights of a SwiGLU network, return
     the output of your implementation with these weights.
 
@@ -77,6 +83,13 @@ def run_swiglu(
     Returns:
         Float[Tensor, "... d_model"]: Output embeddings of the same shape as the input embeddings.
     """
+    swiglu = SwiGLU(d_model, d_ff)
+    swiglu.load_state_dict({
+        "w1_weights": w1_weight,
+        "w2_weights": w2_weight,
+        "w3_weights": w3_weight
+    })
+    return swiglu.forward(in_features)
     # Example:
     # If your state dict keys match, you can use `load_state_dict()`
     # swiglu.load_state_dict(weights)
@@ -84,8 +97,6 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
-
 
 def run_scaled_dot_product_attention(
     Q: Float[Tensor, " ... queries d_k"],
@@ -201,7 +212,8 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    rope = RotaryPositionalEmbedding(theta, d_k, max_seq_len)
+    return rope.forward(in_query_or_key, token_positions)
 
 
 def run_transformer_block(
@@ -301,7 +313,7 @@ def run_transformer_lm(
         num_heads (int): Number of heads to use in multi-headed attention. `d_model` must be
             evenly divisible by `num_heads`.
         d_ff (int): Dimensionality of the feed-forward inner layer (section 3.3).
-        rope_theta (float): The RoPE $\Theta$ parameter.
+        rope_theta (float): The RoPE $Theta$ parameter.
         weights (dict[str, Tensor]):
             State dict of our reference implementation. {num_layers} refers to an
             integer between `0` and `num_layers - 1` (the layer index).
@@ -379,7 +391,11 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    norm = RMSNorm(d_model, eps)
+    norm.load_state_dict(
+        {"gain": weights}
+    )
+    return norm.forward(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
