@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from math import sqrt, sin, cos
+from jaxtyping import Bool, Float, Int
 from einops import rearrange, einsum, reduce
 
 
@@ -166,8 +167,9 @@ class RotaryPositionalEmbedding(nn.Module):
         
         coses = torch.cos(thetas)
         sines = torch.sin(thetas)
-        self.register_buffer("coses", coses)
-        self.register_buffer("sines", sines)
+        self.register_buffer("coses", coses, persistent=False)
+        self.register_buffer("sines", sines, persistent=False)
+        
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
         """
         Process an input tensor of shape (..., seq_len, d_k) and return a tensor of the same shape.
@@ -194,3 +196,239 @@ class RotaryPositionalEmbedding(nn.Module):
         return x_rot
 
 
+def softmax(x: torch.Tensor, coord: int):
+    assert coord < len(x.shape)
+    max_x = torch.amax(x, dim=coord, keepdim=True)
+    x = x - max_x
+    exp_x = torch.exp(x)
+    sum_x = torch.sum(exp_x, dim=coord, keepdim=True)
+    return exp_x / sum_x
+
+def scaled_dot_product_attention(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Given key (K), query (Q), and value (V) tensors, return
+    the output of your scaled dot product attention implementation.
+
+    Args:
+        Q (Float[Tensor, " ... queries d_k"]): Query tensor
+        K (Float[Tensor, " ... keys d_k"]): Key tensor
+        V (Float[Tensor, " ... values d_v"]): Values tensor
+        mask (Bool[Tensor, " ... queries keys"] | None): Mask tensor
+    Returns:
+        Float[Tensor, " ... queries d_v"]: Output of SDPA
+    """
+    assert Q.shape[-1] == K.shape[-1], "query dim must equal key dim"
+    assert (Q.shape[-2] == mask.shape[-2]) & (K.shape[-2] == mask.shape[-1]), "incorrect mask shape"
+    assert V.shape[-2] == K.shape[-2], "key and value sequence lengths should match"
+
+    d_k = K.shape[-1]
+    temp = einsum(
+        Q, K,
+        "... queries d_k, ... keys d_k -> ... queries keys"
+    ) / sqrt(d_k)
+    temp_masked = temp.masked_fill(~mask, -torch.inf)
+    return einsum(
+        softmax(temp_masked, -1), V,
+        "... queries keys, ... keys d_v -> ... queries d_v"
+    )
+
+
+class MultiheadSelfAttention(nn.Module):
+    def __init__(self,
+        d_model: int,
+        num_heads: int,
+        device: torch.device = None,
+        dtype: torch.dtype = None,
+    ) -> None:
+        super().__init__()
+        assert d_model % num_heads == 0, "number of heads must divide model dim"
+        self.W_Q = nn.Parameter(torch.empty((d_model, d_model), device=device, dtype=dtype))
+        self.W_K = nn.Parameter(torch.empty((d_model, d_model), device=device, dtype=dtype))
+        self.W_V = nn.Parameter(torch.empty((d_model, d_model), device=device, dtype=dtype))
+        self.W_O = nn.Parameter(torch.empty((d_model, d_model), device=device, dtype=dtype))
+        init_std = sqrt(1 / d_model)
+        nn.init.trunc_normal_(
+            self.W_Q,
+            std=init_std,
+            a=-3*init_std,
+            b=3*init_std
+        )
+        nn.init.trunc_normal_(
+            self.W_K,
+            std=init_std,
+            a=-3*init_std,
+            b=3*init_std
+        )
+        nn.init.trunc_normal_(
+            self.W_V,
+            std=init_std,
+            a=-3*init_std,
+            b=3*init_std
+        )
+        nn.init.trunc_normal_(
+            self.W_O,
+            std=init_std,
+            a=-3*init_std,
+            b=3*init_std
+        )
+
+        self.d_model = d_model
+        self.num_heads = num_heads
+
+    def forward(self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        queries = einsum(
+            self.W_Q, x,
+            "hd_k d_model, ... seq_len d_model -> ... seq_len hd_k"
+        )
+        keys = einsum(
+            self.W_K, x,
+            "hd_k d_model, ... seq_len d_model -> ... seq_len hd_k"
+        )
+        values = einsum(
+            self.W_V, x,
+            "hd_v d_model, ... seq_len d_model -> ... seq_len hd_v"
+        )
+        queries = rearrange(
+            queries,
+            "... seq_len (h d_k) -> ... h seq_len d_k",
+            h = self.num_heads
+        )
+        keys = rearrange(
+            keys,
+            "... seq_len (h d_k) -> ... h seq_len d_k",
+            h = self.num_heads
+        )
+        values = rearrange(
+            values,
+            "... seq_len (h d_v) -> ... h seq_len d_v",
+            h = self.num_heads
+        )
+
+        seq_len = x.shape[-2]
+        row = torch.arange(seq_len)[None, :]
+        col = torch.arange(seq_len)[:, None]
+        mask = row <= col
+
+        attention = scaled_dot_product_attention(
+            queries,
+            keys,
+            values,
+            mask
+        )
+        attention = rearrange(
+            attention,
+            "... h seq_len d_v -> ... seq_len (h d_v)"
+        )
+        return einsum(
+            self.W_O, attention,
+            "d_model hd_v, ... hd_v -> ... d_model"
+        )
+
+
+class MultiheadSelfAttentionWithRope(nn.Module):
+    def __init__(self,
+        d_model: int,
+        num_heads: int,
+        theta: float,
+        max_seq_len: int,
+        device: torch.device = None,
+        dtype: torch.dtype = None,
+    ) -> None:
+        super().__init__()
+        assert d_model % num_heads == 0, "number of heads must divide model dim"
+        self.W_Q = nn.Parameter(torch.empty((d_model, d_model), device=device, dtype=dtype))
+        self.W_K = nn.Parameter(torch.empty((d_model, d_model), device=device, dtype=dtype))
+        self.W_V = nn.Parameter(torch.empty((d_model, d_model), device=device, dtype=dtype))
+        self.W_O = nn.Parameter(torch.empty((d_model, d_model), device=device, dtype=dtype))
+        init_std = sqrt(1 / d_model)
+        nn.init.trunc_normal_(
+            self.W_Q,
+            std=init_std,
+            a=-3*init_std,
+            b=3*init_std
+        )
+        nn.init.trunc_normal_(
+            self.W_K,
+            std=init_std,
+            a=-3*init_std,
+            b=3*init_std
+        )
+        nn.init.trunc_normal_(
+            self.W_V,
+            std=init_std,
+            a=-3*init_std,
+            b=3*init_std
+        )
+        nn.init.trunc_normal_(
+            self.W_O,
+            std=init_std,
+            a=-3*init_std,
+            b=3*init_std
+        )
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.rope = RotaryPositionalEmbedding(
+            theta, d_model // num_heads, max_seq_len, device
+        )
+
+    def forward(self,
+        x: torch.Tensor,
+        token_positions: Int[torch.Tensor, " ... sequence_length"] | None = None,
+    ) -> torch.Tensor:
+        queries = einsum(
+            self.W_Q, x,
+            "hd_k d_model, ... seq_len d_model -> ... seq_len hd_k"
+        )
+        keys = einsum(
+            self.W_K, x,
+            "hd_k d_model, ... seq_len d_model -> ... seq_len hd_k"
+        )
+        values = einsum(
+            self.W_V, x,
+            "hd_v d_model, ... seq_len d_model -> ... seq_len hd_v"
+        )
+        queries = rearrange(
+            queries,
+            "... seq_len (h d_k) -> ... h seq_len d_k",
+            h = self.num_heads
+        )
+        keys = rearrange(
+            keys,
+            "... seq_len (h d_k) -> ... h seq_len d_k",
+            h = self.num_heads
+        )
+        values = rearrange(
+            values,
+            "... seq_len (h d_v) -> ... h seq_len d_v",
+            h = self.num_heads
+        )
+
+        queries = self.rope.forward(queries, token_positions)
+        keys = self.rope.forward(keys, token_positions)
+
+        seq_len = x.shape[-2]
+        row = torch.arange(seq_len)[None, :]
+        col = torch.arange(seq_len)[:, None]
+        mask = row <= col
+
+        attention = scaled_dot_product_attention(
+            queries,
+            keys,
+            values,
+            mask
+        )
+        attention = rearrange(
+            attention,
+            "... h seq_len d_v -> ... seq_len (h d_v)"
+        )
+        return einsum(
+            self.W_O, attention,
+            "d_model hd_v, ... hd_v -> ... d_model"
+        )
