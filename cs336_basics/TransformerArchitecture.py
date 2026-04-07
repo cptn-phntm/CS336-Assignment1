@@ -170,7 +170,7 @@ class RotaryPositionalEmbedding(nn.Module):
         self.register_buffer("coses", coses, persistent=False)
         self.register_buffer("sines", sines, persistent=False)
         
-    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None) -> torch.Tensor:
         """
         Process an input tensor of shape (..., seq_len, d_k) and return a tensor of the same shape.
         """
@@ -179,7 +179,9 @@ class RotaryPositionalEmbedding(nn.Module):
             "... (pair two) -> ... pair two",
             two=2
         ) # shape (..., seq_len, d_k // 2, 2)
-
+        if token_positions is None:
+            token_positions = torch.arange(x.shape[-2], device=x.device).expand(*x.shape[:-1])
+        
         pos_coses = self.coses[token_positions] # shape (seq_len, d_k // 2)
         pos_sines = self.sines[token_positions] # shape (seq_len, d_k // 2)
         pos_rot1 = torch.stack((pos_coses, -pos_sines), axis = -1)
@@ -432,3 +434,82 @@ class MultiheadSelfAttentionWithRope(nn.Module):
             self.W_O, attention,
             "d_model hd_v, ... hd_v -> ... d_model"
         )
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        max_seq_len: int,
+        theta: int = 10000,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None
+    ) -> None:
+        super().__init__()
+        self.norm1 = RMSNorm(d_model, device=device, dtype=dtype)
+        self.attn = MultiheadSelfAttentionWithRope(
+            d_model,
+            num_heads,
+            theta,
+            max_seq_len,
+            device=device,
+            dtype=dtype
+        )
+        self.norm2 = RMSNorm(d_model, device=device, dtype=dtype)
+        self.ffn = SwiGLU(d_model, d_ff, device=device, dtype=dtype)
+    
+    def forward(self, in_features: Float[torch.Tensor, "batch sequence_length d_model"]):
+        step1 = self.norm1.forward(in_features)
+        step2 = self.attn.forward(step1)
+        temp = in_features + step2
+        step3 = self.norm2.forward(temp)
+        step4 = self.ffn.forward(step3)
+        return temp + step4
+
+class TransformerLM(nn.Module):
+    def __init__(self,
+        vocab_size: int,
+        context_length: int,
+        d_model: int,
+        num_layers: int,
+        num_heads: int,
+        d_ff: int,
+        rope_theta: float,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None
+    ) -> None:
+        super().__init__()
+
+        self.emb = Embedding(
+            num_embeddings=vocab_size,
+            embedding_dim=d_model,
+            device=device,
+            dtype=dtype
+        )
+
+        self.transformer_blocks = []
+        for _ in range(num_layers):
+            transformer_block = TransformerBlock(
+                d_model=d_model,
+                num_heads=num_heads,
+                d_ff=d_ff,
+                max_seq_len=context_length,
+                theta=rope_theta,
+                device=device,
+                dtype=dtype
+            )
+            self.transformer_blocks.append(transformer_block)
+        
+        self.final_norm = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+
+        self.final_linear = Linear(in_features=d_model, out_features=vocab_size)
+    
+    def forward(self, x: torch.Tensor):
+        x = self.emb.forward(x)
+        for block in self.transformer_blocks:
+            x = block.forward(x)
+        x = self.final_norm(x)
+        x = self.final_linear(x)
+        return x
+

@@ -237,7 +237,7 @@ def run_transformer_block(
     max_seq_len: int,
     theta: float,
     weights: dict[str, Tensor],
-    in_features: Float[Tensor, " batch sequence_length d_model"],
+    in_features: Float[Tensor, "batch sequence_length d_model"],
 ) -> Float[Tensor, " batch sequence_length d_model"]:
     """
     Given the weights of a pre-norm Transformer block and input features,
@@ -300,7 +300,27 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    transformer = TransformerBlock(
+        d_model,
+        num_heads,
+        d_ff,
+        max_seq_len,
+        theta
+    )
+    transformer.norm1.load_state_dict({"gain": weights["ln1.weight"]})
+    transformer.attn.load_state_dict({
+        "W_Q": weights["attn.q_proj.weight"],
+        "W_K": weights["attn.k_proj.weight"],
+        "W_V": weights["attn.v_proj.weight"],
+        "W_O": weights["attn.output_proj.weight"]
+    })
+    transformer.norm2.load_state_dict({"gain": weights["ln2.weight"]})
+    transformer.ffn.load_state_dict({
+        "w1_weights": weights["ffn.w1.weight"],
+        "w2_weights": weights["ffn.w2.weight"],
+        "w3_weights": weights["ffn.w3.weight"]
+    })
+    return transformer.forward(in_features)
 
 
 def run_transformer_lm(
@@ -382,7 +402,33 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    transformer = TransformerLM(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        d_model=d_model,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        rope_theta=rope_theta
+    )
+    transformer.emb.load_state_dict({"embeddings": weights["token_embeddings.weight"]})
+    for ind, block in enumerate(transformer.transformer_blocks):
+        block.norm1.load_state_dict({"gain": weights[f"layers.{ind}.ln1.weight"]})
+        block.attn.load_state_dict({
+            "W_Q": weights[f"layers.{ind}.attn.q_proj.weight"],
+            "W_K": weights[f"layers.{ind}.attn.k_proj.weight"],
+            "W_V": weights[f"layers.{ind}.attn.v_proj.weight"],
+            "W_O": weights[f"layers.{ind}.attn.output_proj.weight"]
+        })
+        block.norm2.load_state_dict({"gain": weights[f"layers.{ind}.ln2.weight"]})
+        block.ffn.load_state_dict({
+            "w1_weights": weights[f"layers.{ind}.ffn.w1.weight"],
+            "w2_weights": weights[f"layers.{ind}.ffn.w2.weight"],
+            "w3_weights": weights[f"layers.{ind}.ffn.w3.weight"]
+        })
+    transformer.final_norm.load_state_dict({"gain": weights["ln_final.weight"]})
+    transformer.final_linear.load_state_dict({"weights": weights["lm_head.weight"]})
+    return transformer.forward(in_indices)
 
 
 def run_rmsnorm(
