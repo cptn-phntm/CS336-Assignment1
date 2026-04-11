@@ -58,8 +58,7 @@ class BPETokenizer:
                 self.vocab[key[0]],
                 self.vocab[key[1]])
         )
-    
-        
+
         while self.curr_vocab_size < vocab_size: # perform merge actions.
             # update vocab, vocab size, merges, token pair counts
             self.vocab[self.curr_vocab_size] = self.vocab[merge_pair[0]] + self.vocab[merge_pair[1]]
