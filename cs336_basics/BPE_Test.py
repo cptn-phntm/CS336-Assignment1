@@ -5,15 +5,11 @@ import time
 def main() -> None:
     trainer = BPETrainer(["<|endoftext|>"])
     vocab, merges = trainer.train(
-        input_path="data/TinyStoriesV2-GPT4-train.txt",
-        vocab_size=10000,
+        input_path="data/test.txt",
+        vocab_size=257+20,
     )
     
-    output_path = "./model/bpe_tinystories_vocab_merges.pkl"
-
-    with open(output_path, "wb") as f:
-        pickle.dump((vocab, merges), f)
-    print(f"Vocabulary and merges saved to {output_path}")
+    print(merges)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,17 @@
 import os
 from typing import BinaryIO
 import regex as re
+import heapq
 from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
+
+class MaxItem:
+    def __init__(self, item):
+        self.item = item
+
+    def __lt__(self, other):
+        return self.item > other.item
+
 
 def pretokenize_worker(job):
     input_path, start, end, special_tokens = job
@@ -31,6 +40,7 @@ def pretokenize(
 
         # pretokenize each segment to get segment_words_counter
         TOK_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""    
+        # TOK_PAT = r"\S+"
         for segment in split_text:
             iter = re.finditer(TOK_PAT, segment)
             for match in iter:
@@ -108,8 +118,8 @@ class BPETrainer:
         input_path: str,
         vocab_size: int,
         split_special_token: bytes = b"<|endoftext|>",
-        num_processes: int = 4,
-        ) -> None:
+        num_processes: int = 8,
+        ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
         """
         Train the tokenizer on the input file until the vocabulary size reaches vocab_size.
         """
@@ -150,25 +160,34 @@ class BPETrainer:
         for word in words_counter:
             word_to_tokens[word] = list(int(i) for i in word.encode())
         
+        
         # Step 2: Iteratively merge the most common pair of tokens until vocab_size is reached
 
         # count all the token pairs
         token_pairs_counts = defaultdict(int)
+        pair_to_words = defaultdict(set)
         for word, word_count in words_counter.items():
             word_tokens = word_to_tokens[word]
             word_token_pairs = zip(word_tokens[:-1], word_tokens[1:])
             word_token_pairs_counts = Counter(word_token_pairs)
             for pair, pair_count in word_token_pairs_counts.items():
                 token_pairs_counts[pair] += word_count * pair_count
+                pair_to_words[pair].add(word)
         
-        # find the pair with max count and max alphanumerical order
-        merge_pair = max(
-            token_pairs_counts,
-            key=lambda key: (
-                token_pairs_counts.get(key),
-                self.vocab[key[0]],
-                self.vocab[key[1]])
-        )
+        # # find the pair with max count and max alphanumerical order
+        # merge_pair = max(
+        #     token_pairs_counts,
+        #     key=lambda key: (
+        #         token_pairs_counts.get(key),
+        #         self.vocab[key[0]],
+        #         self.vocab[key[1]])
+        # )
+
+        # build a heap to efficiently get the next pair with max count and max alphanumerical order after each merge
+        heap = [MaxItem((token_pairs_counts[pair], self.vocab[pair[0]], self.vocab[pair[1]], pair)) for pair in token_pairs_counts]
+        heapq.heapify(heap)
+        merge_pair = heapq.heappop(heap)
+        merge_pair = merge_pair.item[-1]
 
         while self.curr_vocab_size < vocab_size: # perform merge actions.
             # update vocab, vocab size, merges, token pair counts
@@ -177,14 +196,19 @@ class BPETrainer:
             self.curr_vocab_size += 1
             self.merges.append((self.vocab[merge_pair[0]], self.vocab[merge_pair[1]]))
             token_pairs_counts.pop(merge_pair)
+            pairs_to_update = pair_to_words[merge_pair].copy()
+            pair_to_words.pop(merge_pair)
             
             # merge: for each word:
             # - change word tokens
             # - for each newly formed pairs, add to new pair, subtract from old pair
-            for word, word_count in words_counter.items():
+            
+            for word in pairs_to_update:
+                word_count = words_counter[word]
                 word_tokens = word_to_tokens[word]
                 new_word_tokens = word_tokens.copy()
                 word_merges = 0
+                updated_pairs = set()
                 i = 0
                 while i < len(word_tokens) - 1:
                     if tuple(word_tokens[i:i+2]) == merge_pair:
@@ -195,11 +219,22 @@ class BPETrainer:
                         
                         # edit token pair counts
                         if i < len(word_tokens) - 2:
-                            token_pairs_counts[tuple(word_tokens[i+1:i+3])] -= word_count
-                            token_pairs_counts[(new_token_id, word_tokens[i+2])] += word_count
+                            old_pair = tuple(word_tokens[i+1:i+3])
+                            token_pairs_counts[old_pair] -= word_count
+                            updated_pairs.add(old_pair)
+
+                            new_pair = (new_token_id, word_tokens[i+2])
+                            token_pairs_counts[new_pair] += word_count
+                            updated_pairs.add(new_pair)
+
                         if i > 0:
-                            token_pairs_counts[tuple(word_tokens[i-1:i+1])] -= word_count
-                            token_pairs_counts[(word_tokens[i-1], new_token_id)] += word_count
+                            old_pair = tuple(word_tokens[i-1:i+1])
+                            token_pairs_counts[old_pair] -= word_count
+                            updated_pairs.add(old_pair)
+
+                            new_pair = (word_tokens[i-1], new_token_id)
+                            token_pairs_counts[new_pair] += word_count
+                            updated_pairs.add(new_pair)
                         
                         # edit word merges count
                         word_merges += 1
@@ -208,15 +243,40 @@ class BPETrainer:
                         i += 1
                 word_to_tokens[word] = new_word_tokens
 
+                # update heap
+                for pair in updated_pairs:
+                    heapq.heappush(heap, MaxItem((token_pairs_counts[pair], self.vocab[pair[0]], self.vocab[pair[1]], pair)))
+
+                # update pair_to_words for the new pairs
+                old_pairs = set(zip(word_tokens[:-1], word_tokens[1:]))
+                new_pairs = set(zip(new_word_tokens[:-1], new_word_tokens[1:]))
+                for removed_pair in old_pairs - new_pairs:
+                    pair_to_words[removed_pair].discard(word)
+                for added_pair in new_pairs - old_pairs:
+                    pair_to_words[added_pair].add(word)
+
             # find the next pair with max count and max alphanumerical order
-            # TODO: use caching to avoid iterating over all byte pairs
-            merge_pair = max(
-                token_pairs_counts,
-                key=lambda key: (
-                    token_pairs_counts.get(key),
-                    self.vocab[key[0]],
-                    self.vocab[key[1]])
-            )
-        
+            # merge_pair = max(
+            #     token_pairs_counts,
+            #     key=lambda key: (
+            #         token_pairs_counts.get(key),
+            #         self.vocab[key[0]],
+            #         self.vocab[key[1]])
+            # )
+            while heap:
+                max_pair = heapq.heappop(heap)
+                count, _, _, pair = max_pair.item
+                # check if max_pair agrees with current token_pairs_counts
+                if token_pairs_counts[pair] == count:
+                    merge_pair = pair
+                    break
+
         return self.vocab, self.merges
 
+
+# class BPETokeniser:
+#     def __init__(self,
+#         vocab: dict[int, str],
+#         merges: list[tuple(bytes, bytes)],
+#         special_tokens: list[str] | None = None   
+#     ) -> None:
