@@ -9,11 +9,14 @@ def main() -> None:
         vocab_size=10000,
     )
     
-    output_path = "./model/bpe_tinystories_vocab_merges.pkl"
+    vocab_path = "./model/bpe_tinystories_vocab.pkl"
+    merges_path = "./model/bpe_tinystories_merges.pkl"
 
-    with open(output_path, "wb") as f:
-        pickle.dump((vocab, merges), f)
-    print(f"Vocabulary and merges saved to {output_path}")
+    with open(vocab_path, "wb") as f:
+        pickle.dump(vocab, f)
+    with open(merges_path, "wb") as f:
+        pickle.dump(merges, f)
+    print(f"Vocabulary and merges saved to {vocab_path} and {merges_path}")
 
 
 if __name__ == "__main__":

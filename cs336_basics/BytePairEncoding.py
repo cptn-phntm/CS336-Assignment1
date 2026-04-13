@@ -1,9 +1,10 @@
 import os
-from typing import BinaryIO
+from typing import BinaryIO, Self, Iterable, Iterator
 import regex as re
 import heapq
 from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
+import pickle
 
 class MaxItem:
     def __init__(self, item):
@@ -273,10 +274,148 @@ class BPETrainer:
 
         return self.vocab, self.merges
 
+def apply_merge(
+    tok_list: list[bytes],
+    merge: tuple[bytes, bytes],
+) -> list[bytes]:
+    merged_list: list[bytes] = []
+    b1, b2 = merge
+    i = 0
+    while i < len(tok_list):
+        if i + 1 < len(tok_list) and (tok_list[i] == b1) and (tok_list[i+1] == b2):
+            merged_list.append(b1 + b2)
+            i += 2
+        else:
+            merged_list.append(tok_list[i])
+            i += 1
+    return merged_list
+        
 
-# class BPETokeniser:
-#     def __init__(self,
-#         vocab: dict[int, str],
-#         merges: list[tuple(bytes, bytes)],
-#         special_tokens: list[str] | None = None   
-#     ) -> None:
+def encode_pretokens(
+    pretok: bytes, 
+    token_to_id: dict[bytes, int],
+    merges: list[tuple[bytes, bytes]],
+) -> list[int]:
+    # turn tok into list of bytes
+    tok_list = [pretok[i:i+1] for i in range(len(pretok))]
+
+    # merge pairs of bytes
+    for merge in merges:
+        tok_list = apply_merge(tok_list, merge)
+    
+    # encode each token to their ids
+    return [token_to_id[tok] for tok in tok_list]
+
+
+def encode_pretokens_iter(
+    pretok: bytes, 
+    token_to_id: dict[bytes, int],
+    merges: list[tuple[bytes, bytes]],
+) -> Iterator[int]:
+    # turn tok into list of bytes
+    tok_list = [pretok[i:i+1] for i in range(len(pretok))]
+
+    # merge pairs of bytes
+    for merge in merges:
+        tok_list = apply_merge(tok_list, merge)
+    
+    # encode each token to their ids
+    for tok in tok_list:
+        yield token_to_id[tok]
+
+
+class BPETokenizer:
+    def __init__(self,
+        vocab: dict[int, str],
+        merges: list[tuple[bytes, bytes]],
+        special_tokens: list[str] | None = None   
+    ) -> None:
+        self.vocab = vocab
+        max_key = max(self.vocab)
+        i = 0
+
+        self.token_to_id = {}
+        for id, token in vocab.items():
+            self.token_to_id[token] = id
+        self.merges = merges
+        self.special_tokens = sorted(special_tokens, reverse=True) if special_tokens is not None else []
+    
+    @classmethod
+    def from_files(cls,
+        vocab_filepath: str,
+        merges_filepath: str,
+        special_tokens: list[str] | None = None
+    ) -> Self:
+        vocab = pickle.load(open(vocab_filepath, "rb"))
+        merges = pickle.load(open(merges_filepath, "rb"))
+        return cls(vocab, merges, special_tokens)
+    
+    def encode(self, text: str) -> list[int]:
+        output = []
+        # split on special
+        if self.special_tokens:
+            SPE_PAT = '|'.join([re.escape(token) for token in self.special_tokens])
+            split_text = re.split(f"({SPE_PAT})", text)
+        else:
+            split_text = [text]
+
+        # pretokenize
+        TOK_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        for segment in split_text:
+            if segment in self.special_tokens:
+                output += [self.token_to_id[segment.encode()]]
+            else:
+                iter = re.finditer(TOK_PAT, segment)
+                for match in iter:
+                    pretoken = match.group(0).encode()
+                    tokenized_word = encode_pretokens(
+                        pretoken,
+                        self.token_to_id,
+                        self.merges
+                    )
+                    output += tokenized_word
+        return output
+    
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        prev_chunk_end = ""
+        for chunk in iterable:
+            chunk = prev_chunk_end + chunk
+            prev_chunk_end = ""
+
+            # split on special
+            if self.special_tokens:
+                SPE_PAT = '|'.join([re.escape(token) for token in self.special_tokens])
+                split_text = re.split(f"({SPE_PAT})", chunk)
+            else:
+                split_text = [chunk]
+
+            # pretokenize
+            TOK_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+            for segment in split_text:
+                if segment in self.special_tokens:
+                    pass
+                    yield self.token_to_id[segment.encode()]
+                else:
+                    iter = re.finditer(TOK_PAT, segment)
+                    curr_match = next(iter, None)
+                    while curr_match is not None:
+                        next_match = next(iter, None)
+                        if next is None:
+                            prev_chunk_end = curr_match.group(0)
+                            break
+                        else:
+                            pretoken = curr_match.group(0).encode()
+                            tokenized_word_iter= encode_pretokens(
+                                pretoken,
+                                self.token_to_id,
+                                self.merges
+                            )
+                            yield from tokenized_word_iter
+                        curr_match = next_match
+
+
+    def decode(self, ids: list[int]) -> str:
+        output = b""
+        for id in ids:
+            output += self.vocab[id]
+        return output.decode(errors="replace")

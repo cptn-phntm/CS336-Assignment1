@@ -9,8 +9,7 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from cs336_basics.BPETokenizer import BPETokenizer
-from cs336_basics.BytePairEncoding import BPETrainer
+from cs336_basics.BytePairEncoding import BPETrainer, BPETokenizer
 from cs336_basics.TransformerArchitecture import *
 from cs336_basics.TrainingTools import *
 
@@ -644,7 +643,7 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    return BPETokenizer(vocab, merges, special_tokens)
 
 
 def run_train_bpe(
