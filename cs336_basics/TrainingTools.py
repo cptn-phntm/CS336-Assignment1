@@ -93,17 +93,21 @@ class AdamW(torch.optim.Optimizer):
                 if p.grad is None:
                     continue
 
+                original_dtype = p.dtype
+
                 state = self.state[p] # Get state associated with p.
-                m = state.get("m", torch.zeros_like(p)) # Get first moment from the state, or initial value.
-                v = state.get("v", torch.zeros_like(p)) # Get second moment from the state, or initial value.
+                m = state.get("m", torch.zeros_like(p, dtype=torch.float32)) # Get first moment from the state, or initial value.
+                v = state.get("v", torch.zeros_like(p, dtype=torch.float32)) # Get second moment from the state, or initial value.
                 t = state.get("t", 1) # Get iteration number from the state, or initial value.
-                grad = p.grad.data # Get the gradient of loss with respect to p.
+                grad = p.grad.detach().to(torch.float32) # Get the gradient of loss with respect to p.
                 
                 m = beta1 * m + (1 - beta1) * grad # Update m
                 v = beta2 * v + (1 - beta2) * grad ** 2 # Update v
                 alpha = lr * sqrt(1 - beta2 ** t) / (1 - beta1 ** t) # Compute adjusted alpha for this iteration
-                p.data -= alpha * m / (torch.sqrt(v) + eps) # Update parameters
-                p.data -= lr * wd * p.data
+                update = alpha * m / (torch.sqrt(v) + eps)
+                with torch.no_grad():
+                    p *= 1 - lr * wd # Apply weight decay
+                    p -= update.to(original_dtype) # Update parameters
 
                 state["t"] = t + 1 # Increment iteration number.
                 state["m"] = m
@@ -189,7 +193,7 @@ def data_loading(
     total_length = dataset.shape[0]
     start_index = np.random.randint(0, total_length-context_length, size = (batch_size, 1))
     arr = dataset[start_index + np.arange(context_length+1)]
-    return torch.Tensor(arr[:, :-1], device=device), torch.Tensor(arr[:, 1:], device=device)
+    return torch.LongTensor(arr[:, :-1], device=device), torch.LongTensor(arr[:, 1:], device=device)
 
 def save_checkpoint(
     model: torch.nn.Module,

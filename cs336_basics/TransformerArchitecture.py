@@ -487,20 +487,21 @@ class TransformerLM(nn.Module):
             device=device,
             dtype=dtype
         )
-
-        self.transformer_blocks = []
-        for _ in range(num_layers):
-            transformer_block = TransformerBlock(
-                d_model=d_model,
-                num_heads=num_heads,
-                d_ff=d_ff,
-                max_seq_len=context_length,
-                theta=rope_theta,
-                device=device,
-                dtype=dtype
-            )
-            self.transformer_blocks.append(transformer_block)
         
+        self.transformer_blocks = nn.ModuleList(
+            [
+                TransformerBlock(
+                    d_model=d_model,
+                    num_heads=num_heads,
+                    d_ff=d_ff,
+                    max_seq_len=context_length,
+                    theta=rope_theta,
+                    device=device,
+                    dtype=dtype
+                ) for _ in range(num_layers)
+            ]
+        )
+
         self.final_norm = RMSNorm(d_model=d_model, device=device, dtype=dtype)
 
         self.final_linear = Linear(in_features=d_model, out_features=vocab_size)

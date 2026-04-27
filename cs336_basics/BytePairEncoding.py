@@ -13,7 +13,6 @@ class MaxItem:
     def __lt__(self, other):
         return self.item > other.item
 
-
 def pretokenize_worker(job):
     input_path, start, end, special_tokens = job
     return pretokenize(input_path, start, end, special_tokens)
@@ -331,7 +330,6 @@ class BPETokenizer:
         special_tokens: list[str] | None = None   
     ) -> None:
         self.vocab = vocab
-        max_key = max(self.vocab)
         i = 0
 
         self.token_to_id = {}
@@ -360,6 +358,7 @@ class BPETokenizer:
             split_text = [text]
 
         # pretokenize
+        pretoken_cache = {token: [self.token_to_id[token]] for token in self.token_to_id}
         TOK_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
         for segment in split_text:
             if segment in self.special_tokens:
@@ -368,11 +367,15 @@ class BPETokenizer:
                 iter = re.finditer(TOK_PAT, segment)
                 for match in iter:
                     pretoken = match.group(0).encode()
-                    tokenized_word = encode_pretokens(
-                        pretoken,
-                        self.token_to_id,
-                        self.merges
-                    )
+                    if pretoken in pretoken_cache:
+                        tokenized_word = pretoken_cache[pretoken]
+                    else:
+                        tokenized_word = encode_pretokens(
+                            pretoken,
+                            self.token_to_id,
+                            self.merges
+                        )
+                        pretoken_cache[pretoken] = tokenized_word
                     output += tokenized_word
         return output
     
@@ -390,26 +393,30 @@ class BPETokenizer:
                 split_text = [chunk]
 
             # pretokenize
+            pretoken_cache = {}
             TOK_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-            for segment in split_text:
+            for ind, segment in enumerate(split_text):
                 if segment in self.special_tokens:
-                    pass
                     yield self.token_to_id[segment.encode()]
                 else:
                     iter = re.finditer(TOK_PAT, segment)
                     curr_match = next(iter, None)
                     while curr_match is not None:
                         next_match = next(iter, None)
-                        if next is None:
+                        if next_match is None and ind < len(split_text) - 1:
                             prev_chunk_end = curr_match.group(0)
                             break
                         else:
                             pretoken = curr_match.group(0).encode()
-                            tokenized_word_iter= encode_pretokens(
-                                pretoken,
-                                self.token_to_id,
-                                self.merges
-                            )
+                            if pretoken in pretoken_cache:
+                                tokenized_word_iter = pretoken_cache[pretoken]
+                            else:
+                                tokenized_word_iter = encode_pretokens(
+                                    pretoken,
+                                    self.token_to_id,
+                                    self.merges
+                                )
+                                pretoken_cache[pretoken] = tokenized_word_iter
                             yield from tokenized_word_iter
                         curr_match = next_match
 
